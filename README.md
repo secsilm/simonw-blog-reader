@@ -16,12 +16,26 @@ It ships in three forms that share the same fetch/parse core:
 
 ## Install
 
+Dependencies are managed with [uv](https://docs.astral.sh/uv/). The
+repo includes a committed `uv.lock` for reproducible installs.
+
 ```bash
-pip install -e .
-cp .env.example .env   # then fill in OPENAI_API_KEY (and optional bot token)
+uv sync                    # create .venv and install from uv.lock
+cp .env.example .env       # fill in OPENAI_API_KEY (and optional bot token)
 ```
 
-Python 3.10+ is required.
+Python 3.10+ is required (uv will pick or download a suitable
+interpreter automatically).
+
+Run any of the entry points via `uv run`:
+
+```bash
+uv run simonw-fetch <url>
+uv run simonw-read  <url>
+uv run simonw-read-bot
+```
+
+If you'd rather not use uv, `pip install -e .` still works.
 
 ## Configuration
 

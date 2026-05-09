@@ -26,8 +26,9 @@ anything that's clearly not an article.
 ## Prerequisites
 
 - Python 3.10+
-- The package importable: either `pip install -e .` from the repo root,
-  or run from the source tree (the wrapper script handles `PYTHONPATH`).
+- One of: the package installed (`uv pip install -e .` or `pip install -e
+  .`) **or** `uv` available so the wrapper can `uv run` from the repo
+  using the committed `uv.lock`.
 - No API keys required.
 
 ## How to invoke
@@ -36,12 +37,16 @@ anything that's clearly not an article.
 bash skills/simonw-reader/scripts/read.sh <url> [--max-refs N] [--ref-chars N]
 ```
 
-Or directly:
+The wrapper picks, in order: an installed `simonw-fetch` on `PATH`,
+`uv run simonw-fetch` from the repo root, or finally a bare `python -m
+simonw_reader.fetch_cli` against the source tree.
+
+Or invoke directly:
 
 ```bash
 simonw-fetch <url> [--max-refs N] [--ref-chars N]
-# or, from a source checkout without install:
-PYTHONPATH=src python -m simonw_reader.fetch_cli <url> ...
+# or, from a source checkout:
+uv run simonw-fetch <url> ...
 ```
 
 Defaults: up to 8 references, 6000 chars of extracted text per reference.
