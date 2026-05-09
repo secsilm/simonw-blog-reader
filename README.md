@@ -7,11 +7,12 @@ body, follows each one *one level deep*, and asks an LLM to explain how
 each reference supports the original article. The result is a single
 Markdown report.
 
-It ships in three forms that share the same Python core:
+It ships in three forms that share the same fetch/parse core:
 
-1. **CLI** — `simonw-read <url>`
-2. **Telegram bot** (long polling) — `simonw-read-bot`
-3. **Claude Code skill** — `skills/simonw-reader/SKILL.md`
+1. **`simonw-read <url>`** — CLI that does fetch + LLM analysis end-to-end (needs `OPENAI_API_KEY`).
+2. **`simonw-fetch <url>`** — fetch-only CLI emitting JSON (no LLM, no API key). Used by the skill.
+3. **Telegram bot** (long polling) — `simonw-read-bot` (needs `OPENAI_API_KEY` + `TELEGRAM_BOT_TOKEN`).
+4. **Claude Code skill** — `skills/simonw-reader/SKILL.md`. Calls `simonw-fetch` and lets the host model (Claude) write the analysis itself, so it requires **no OpenAI key**.
 
 ## Install
 
@@ -34,7 +35,9 @@ Python 3.10+ is required.
 | `TELEGRAM_BOT_TOKEN`        | —              | Required only for the Telegram bot                   |
 | `TELEGRAM_ALLOWED_USER_IDS` | —              | Comma-separated allowlist; empty = open to everyone  |
 
-## CLI
+## CLIs
+
+### `simonw-read` — full analysis (uses OpenAI)
 
 ```bash
 simonw-read https://simonwillison.net/2024/Aug/13/quoting-paul-graham/
@@ -48,6 +51,20 @@ Stdout is a Markdown report; stderr contains progress (with `-v`) and any
 warnings about references that could not be fetched. Failed references are
 also listed in a `## Fetch warnings` section of the report itself — the
 tool never invents content for a page it could not load.
+
+### `simonw-fetch` — fetch only (no LLM)
+
+```bash
+simonw-fetch <url> --max-refs 8 --ref-chars 6000 | jq .
+```
+
+Emits JSON: `{post:{url,title,text}, references:[{url, anchor_text,
+context, fetched_text, error}, ...], fetch_warnings:[...]}`. No API key
+required. Used by the Claude Code skill, but also handy as a building
+block for any agent or pipeline.
+
+Exit codes: `0` success, `2` fetch failure (a JSON error payload is still
+written to stdout: `{"error":"fetch_failed","url":...,"message":...}`).
 
 ## Telegram bot
 
@@ -63,11 +80,11 @@ Set `TELEGRAM_ALLOWED_USER_IDS` to lock the bot to specific accounts.
 
 ## Claude Code skill
 
-The skill description and a wrapper script live under
-`skills/simonw-reader/`. Copy or symlink that directory into the standard
-skills location for your environment, and the agent will know to invoke
-`bash skills/simonw-reader/scripts/read.sh <url>` whenever a Simon
-Willison URL appears.
+The skill (`skills/simonw-reader/SKILL.md` + `scripts/read.sh`) is
+**fetch-only**. Claude Code invokes `simonw-fetch` to get JSON for the
+post + each cited page, then writes the analysis itself. No OpenAI key,
+no second LLM. Copy or symlink `skills/simonw-reader/` into your skills
+directory.
 
 ## How references are picked
 

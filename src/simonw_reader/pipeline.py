@@ -9,10 +9,115 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
-from . import analyzer, fetcher
+from . import fetcher
 from .fetcher import BlogPost, FetchError, Reference
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fetch-only pipeline (no LLM)
+#
+# This is what the Claude Code skill uses: it returns the article body plus
+# every reference's fetched plain text (or an error string), and lets the
+# host LLM do the actual analysis.
+
+
+@dataclass
+class FetchedReference:
+    reference: Reference
+    text: str | None = None  # Readable plain text, truncated.
+    error: str | None = None
+
+
+@dataclass
+class FetchResult:
+    post: BlogPost
+    references: list[FetchedReference] = field(default_factory=list)
+    fetch_warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "post": {
+                "url": self.post.url,
+                "title": self.post.title,
+                "text": self.post.text,
+            },
+            "references": [
+                {
+                    "url": r.reference.url,
+                    "anchor_text": r.reference.anchor_text,
+                    "context": r.reference.context,
+                    "fetched_text": r.text,
+                    "error": r.error,
+                }
+                for r in self.references
+            ],
+            "fetch_warnings": self.fetch_warnings,
+        }
+
+
+def fetch_with_references(
+    url: str,
+    *,
+    max_references: int | None = None,
+    ref_char_limit: int = 6000,
+    progress=None,
+) -> FetchResult:
+    """Fetch the post and the readable text of each top reference.
+
+    Does *not* call any LLM. Use this when the caller (e.g. an agent already
+    backed by a capable model) wants to do the analysis itself.
+    """
+
+    def report(msg: str) -> None:
+        logger.info(msg)
+        if progress is not None:
+            try:
+                progress(msg)
+            except Exception:  # noqa: BLE001
+                logger.exception("progress callback raised")
+
+    max_refs = _default_max_refs() if max_references is None else max_references
+
+    report(f"Fetching {url} ...")
+    post = fetcher.fetch_and_parse(url)
+    report(f"Got post '{post.title}' with {len(post.references)} link(s).")
+
+    chosen = fetcher.select_top_references(post.references, max_refs) if max_refs else []
+    fetched: list[FetchedReference] = []
+    warnings: list[str] = []
+
+    if chosen:
+        report(f"Fetching {len(chosen)} reference(s) one level deep...")
+        results: dict[str, tuple[str | None, str | None]] = {}
+        with ThreadPoolExecutor(max_workers=min(8, len(chosen))) as pool:
+            futures = {
+                pool.submit(fetcher.fetch_readable, r.url, ref_char_limit): r
+                for r in chosen
+            }
+            for fut in as_completed(futures):
+                ref = futures[fut]
+                try:
+                    results[ref.url] = (fut.result(), None)
+                except FetchError as exc:
+                    results[ref.url] = (None, str(exc))
+                    warnings.append(f"{ref.url}: {exc}")
+                    report(f"⚠ Failed to fetch reference: {ref.url}: {exc}")
+                except Exception as exc:  # noqa: BLE001
+                    results[ref.url] = (None, f"unexpected error: {exc}")
+                    warnings.append(f"{ref.url}: unexpected error: {exc}")
+                    report(f"⚠ Failed to fetch reference: {ref.url}: {exc}")
+
+        for ref in chosen:  # preserve original order
+            text, err = results.get(ref.url, (None, "not fetched"))
+            fetched.append(FetchedReference(reference=ref, text=text, error=err))
+
+    return FetchResult(post=post, references=fetched, fetch_warnings=warnings)
+
+
+# ---------------------------------------------------------------------------
+# Analysis pipeline (uses OpenAI). Kept for the CLI/Telegram bot.
 
 
 @dataclass
@@ -90,6 +195,10 @@ def run(
                 progress(msg)
             except Exception:  # noqa: BLE001 - progress callback must not break the run
                 logger.exception("progress callback raised")
+
+    # Lazy import so the fetch-only path (and the skill) doesn't drag in
+    # the openai SDK or require OPENAI_API_KEY.
+    from . import analyzer
 
     max_refs = _default_max_refs() if max_references is None else max_references
     lang = (lang or _default_lang()).lower()

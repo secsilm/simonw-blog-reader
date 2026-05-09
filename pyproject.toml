@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 simonw-read = "simonw_reader.cli:main"
+simonw-fetch = "simonw_reader.fetch_cli:main"
 simonw-read-bot = "simonw_reader.tg_bot:main"
 
 [tool.hatch.build.targets.wheel]

@@ -1,97 +1,112 @@
 ---
 name: simonw-reader
-description: Read and analyse a Simon Willison blog post. Fetches the article, follows its referenced links one level deep, and produces a structured Markdown analysis explaining what each reference is and how it supports the original post. Trigger when the user provides a URL on simonwillison.net (or asks to "read" / "analyse" / "summarise" a Simon Willison post), or when they paste any blog post URL and ask for a reference-aware reading.
+description: Read and analyse a Simon Willison blog post (or any blog post with citations). Fetches the article and the readable text of every link it cites, one level deep, then YOU produce a structured Markdown analysis explaining how each reference supports the original. Trigger when the user gives a URL on simonwillison.net, or any blog URL and asks for a "reference-aware" / "with citations" reading.
 ---
 
 # Simon Willison Blog Reader
 
-This skill drives a small Python tool that:
+This skill is a **fetch-only data source**. The Python script does *no*
+LLM work — it just downloads the post, extracts every cited link, fetches
+each linked page's readable text, and emits JSON. **You** (the agent
+calling the skill) do the actual analysis using that JSON.
 
-1. Fetches the blog post at a URL.
-2. Extracts the main article text and every outbound link in the body.
-3. Fetches each referenced page (one level deep) and asks an LLM how that
-   reference supports the original article (evidence, definition, example,
-   counterpoint, further reading, ...).
-4. Returns a single Markdown report.
+That means: no `OPENAI_API_KEY` needed, no extra LLM round-trips, no
+double-summarisation.
 
 ## When to use
 
 - The user gives you a URL from `simonwillison.net` and asks for a summary
   or reading help.
-- The user pastes any blog post URL and explicitly asks for a
-  "reference-aware" / "with citations" reading.
-- The user says things like "帮我读一下这篇 Simon 的博客" / "analyse this post
-  and its citations".
+- The user pastes a blog URL and asks for a reference-aware reading
+  ("帮我读一下这篇并分析它引用的链接", "summarise this and its citations").
 
-Do NOT use this skill if the user only wants a one-line summary, or if
-the URL is clearly not an article (homepage, tag index, login page).
+Do **not** use it for one-line summaries, homepages, tag indexes, or
+anything that's clearly not an article.
 
 ## Prerequisites
 
-The host machine needs:
-
 - Python 3.10+
-- The package installed (`pip install -e .` from the repo root) **or** the
-  source available so `python -m simonw_reader` resolves.
-- `OPENAI_API_KEY` set in the environment. Optionally
-  `SIMONW_OPENAI_MODEL` (default `gpt-4o-mini`),
-  `SIMONW_OUTPUT_LANG` (`zh` or `en`, default `zh`),
-  `SIMONW_MAX_REFERENCES` (default `8`).
-
-If the key is missing the tool will exit with a clear error — surface that
-error to the user and stop.
+- The package importable: either `pip install -e .` from the repo root,
+  or run from the source tree (the wrapper script handles `PYTHONPATH`).
+- No API keys required.
 
 ## How to invoke
 
-Run the wrapper script and stream its stdout back to the user:
+```bash
+bash skills/simonw-reader/scripts/read.sh <url> [--max-refs N] [--ref-chars N]
+```
+
+Or directly:
 
 ```bash
-bash skills/simonw-reader/scripts/read.sh <url> [--lang zh|en] [--max-refs N] [--json]
+simonw-fetch <url> [--max-refs N] [--ref-chars N]
+# or, from a source checkout without install:
+PYTHONPATH=src python -m simonw_reader.fetch_cli <url> ...
 ```
 
-Or call the Python module directly:
+Defaults: up to 8 references, 6000 chars of extracted text per reference.
 
-```bash
-python -m simonw_reader <url> [--lang zh|en] [--max-refs N] [--json]
+## Output (JSON on stdout)
+
+```json
+{
+  "post": {
+    "url": "...",
+    "title": "...",
+    "text": "<plain-text article body, paragraphs separated by blank lines>"
+  },
+  "references": [
+    {
+      "url": "...",
+      "anchor_text": "<the link text used in the original>",
+      "context": "<the paragraph the link sits in>",
+      "fetched_text": "<plain-text body of the referenced page, truncated>",
+      "error": null
+    },
+    {
+      "url": "...",
+      "anchor_text": "...",
+      "context": "...",
+      "fetched_text": null,
+      "error": "Failed to fetch ...: 404 Not Found"
+    }
+  ],
+  "fetch_warnings": ["<url>: <reason>", "..."]
+}
 ```
 
-- Default output is Markdown on stdout — paste it back to the user verbatim
-  (don't paraphrase; the LLM analysis is already done).
-- Pass `--json` if you need to post-process structured fields
-  (`post`, `body_analysis`, `references[]`, `fetch_warnings`).
-- Exit code `0` = success; `2` = fetch failure; `3` = LLM/analysis failure.
-  On non-zero exit, report the exact stderr message to the user — do not
-  retry silently.
+Exit code `0` on success, `2` on post-fetch failure (stdout will be a
+single JSON object: `{"error":"fetch_failed","url":...,"message":...}`).
 
-## Output shape (Markdown mode)
+## What you should do with it
 
-```
-# <post title>
-Source: <url>
-
-## Overview
-...
-
-## Key points
-- ...
-
-## Fetch warnings   (only if some references could not be fetched)
-- <url>: <reason>
-
-## References
-### [1] <anchor text>
-<url>
-### Summary
-...
-### Role in the original post
-...
-```
+1. Parse the JSON. If the top-level `error` field is set, **stop** and
+   tell the user the fetch failed — do not invent content.
+2. From `post.text`, write a Markdown report with these sections:
+   - `# <post title>` and `Source: <post.url>`
+   - `## Overview` — 3-5 sentences of what the post is about.
+   - `## Key points` — 3-7 bullets.
+3. For each item in `references`:
+   - If `error` is set, list it under `## Fetch warnings` and emit a
+     `### [N] <anchor>` entry that says "⚠ Could not fetch: <error>".
+     **Never** invent what the page would have said.
+   - Otherwise, read `fetched_text` and write:
+     - `### [N] <anchor_text>` plus the URL on its own line
+     - `### Summary` — 2-4 sentences on what the referenced page is about.
+     - `### Role in the original post` — 2-4 sentences explaining how
+       this reference supports the original. Be specific: is it evidence,
+       a definition, an example, a counter-point, further reading? Use
+       the `context` field to ground your answer in *where* the link
+       appears in the original.
+4. Match the user's language (default: respond in the language they wrote
+   in). Don't translate the post title or URLs.
 
 ## Failure handling
 
-- If the post URL itself fails to fetch, the tool exits with code 2 and
-  prints the reason on stderr. Surface that error to the user.
-- If individual references fail (404, paywall, timeouts), they appear in
-  `## Fetch warnings` and as `⚠ Could not analyse this reference: ...` in
-  the per-reference section. The rest of the report is still valid.
-- Never invent content for a failed reference.
+- Top-level fetch failure → exit code 2, JSON `{"error":"fetch_failed",...}`.
+  Surface the message to the user. Do not retry blindly.
+- Per-reference failure → entry has `"error": "..."` and `"fetched_text":
+  null`. Include it under `## Fetch warnings` and the per-reference
+  section, but keep the rest of the report.
+- Empty `references` array → just produce the body analysis; mention that
+  the post doesn't cite external sources.
